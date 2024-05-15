@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -14,20 +15,72 @@ void main() async {
     ),
   );
   FirebaseFirestore.instance.settings = const Settings(persistenceEnabled: true);
-  runApp(const MaterialApp(
-    debugShowCheckedModeBanner: false,
-    home: MyHomePage(),
-  ));
+  runApp(
+    ChangeNotifierProvider(
+      create: (context) => TodoProvider(),
+      child: const MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: MyHomePage(),
+      ),
+    ),
+  );
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({Key? key});
+class TodoProvider extends ChangeNotifier {
+  List<String> _todos = [];
 
-  @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  List<String> get todos => _todos;
+
+  Future<void> loadTodos(String userId) async {
+    try {
+      QuerySnapshot querySnapshot = await FirebaseFirestore.instance
+          .collection("MyToDoList")
+          .where("userId", isEqualTo: userId)
+          .get();
+      _todos = querySnapshot.docs.map<String>((doc) => doc["todoTitle"] as String).toList();
+
+      notifyListeners();
+    } catch (e) {
+      print("Error loading todos: $e");
+    }
+  }
+
+  Future<void> addTodo(String todoTitle, String userId) async {
+    try {
+      await FirebaseFirestore.instance.collection("MyToDoList").add({
+        "todoTitle": todoTitle,
+        "userId": userId,
+      });
+      await loadTodos(userId);
+    } catch (e) {
+      print("Error creating todo: $e");
+    }
+  }
+
+  Future<void> removeTodo(String todoTitle, String userId) async {
+    try {
+      await FirebaseFirestore.instance
+          .collection("MyToDoList")
+          .where("todoTitle", isEqualTo: todoTitle)
+          .where("userId", isEqualTo: userId)
+          .get()
+          .then(
+            (QuerySnapshot snapshot) {
+          snapshot.docs.forEach((doc) {
+            doc.reference.delete();
+          });
+        },
+      );
+      await loadTodos(userId);
+    } catch (e) {
+      print("Error deleting todo: $e");
+    }
+  }
 }
 
-class _MyHomePageState extends State<MyHomePage> {
+class MyHomePage extends StatelessWidget {
+  const MyHomePage({Key? key}) : super(key: key);
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -111,73 +164,31 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 }
 
-class TodoListPage extends StatefulWidget {
+class TodoListPage extends StatelessWidget {
   const TodoListPage({Key? key}) : super(key: key);
 
   @override
-  _TodoListPageState createState() => _TodoListPageState();
-}
-
-class _TodoListPageState extends State<TodoListPage> {
-  List todos = [];
-  String inputField = "";
-
-  Future<void> createTodos(String todoTitle) async {
-    try {
-      await FirebaseFirestore.instance.collection("MyToDoList").add({
-        "todoTitle": todoTitle,
-        "userId": FirebaseAuth.instance.currentUser!.uid,
-      });
-    } catch (e) {
-      print("Error creating todo: $e");
-    }
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    loadTodos();
-  }
-
-  Future<void> loadTodos() async {
-    try {
-      QuerySnapshot querySnapshot = await FirebaseFirestore.instance
-          .collection("MyToDoList")
-          .where("userId", isEqualTo: FirebaseAuth.instance.currentUser!.uid)
-          .get();
-      setState(() {
-        todos = querySnapshot.docs.map((doc) => doc["todoTitle"]).toList();
-      });
-    } catch (e) {
-      print("Error loading todos: $e");
-    }
-  }
-
-  // Fonction pour gérer la déconnexion de l'utilisateur
-  Future<void> _signOut() async {
-    try {
-      await FirebaseAuth.instance.signOut();
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => MyHomePage()),
-      );
-    } catch (e) {
-      print("Error signing out: $e");
-    }
-  }
-
-  @override
   Widget build(BuildContext context) {
+    final todoProvider = Provider.of<TodoProvider>(context);
+    final user = FirebaseAuth.instance.currentUser;
+    final userId = user?.uid ?? '';
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text("TODO LIST",style: TextStyle(color: Colors.white)),
+        title: const Text("TODO LIST", style: TextStyle(color: Colors.white)),
         backgroundColor: Colors.blue,
         automaticallyImplyLeading: false,
         actions: [
           // Ajout du bouton de déconnexion
           IconButton(
-            icon: Icon(Icons.logout,color: Colors.white),
-            onPressed: _signOut,
+            icon: Icon(Icons.logout, color: Colors.white),
+            onPressed: () async {
+              await FirebaseAuth.instance.signOut();
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(builder: (context) => MyHomePage()),
+              );
+            },
           ),
         ],
       ),
@@ -186,6 +197,7 @@ class _TodoListPageState extends State<TodoListPage> {
           showDialog(
             context: context,
             builder: (BuildContext context) {
+              String inputField = '';
               return AlertDialog(
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                 title: const Text("Add new task"),
@@ -198,8 +210,7 @@ class _TodoListPageState extends State<TodoListPage> {
                   TextButton(
                     onPressed: () async {
                       if (inputField.isNotEmpty) {
-                        await createTodos(inputField);
-                        await loadTodos();
+                        await todoProvider.addTodo(inputField, userId);
                       }
                       Navigator.of(context).pop();
                     },
@@ -216,54 +227,95 @@ class _TodoListPageState extends State<TodoListPage> {
           color: Colors.white,
         ),
       ),
-      body: ListView.builder(
-        itemCount: todos.length,
-        itemBuilder: (BuildContext context, int index) {
-          return Dismissible(
-            key: Key(todos[index]),
-            direction: DismissDirection.endToStart,
-            onDismissed: (direction) async {
-              await FirebaseFirestore.instance
-                  .collection("MyToDoList")
-                  .where("todoTitle", isEqualTo: todos[index])
-                  .get()
-                  .then(
-                    (QuerySnapshot snapshot) {
-                  snapshot.docs.forEach((doc) {
-                    doc.reference.delete();
-                  });
+      body: Consumer<TodoProvider>(
+        builder: (context, todoProvider, child) {
+          final todos = todoProvider.todos;
+          return ListView.builder(
+            itemCount: todos.length,
+            itemBuilder: (BuildContext context, int index) {
+              return Dismissible(
+                key: Key(todos[index]),
+                direction: DismissDirection.endToStart,
+                onDismissed: (direction) async {
+                  await todoProvider.removeTodo(todos[index], userId);
                 },
-              );
-              await loadTodos();
-            },
-            child: Card(
-              elevation: 4,
-              margin: const EdgeInsets.all(10),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-              child: ListTile(
-                title: Text(todos[index]),
-                trailing: IconButton(
-                  icon: const Icon(
-                    Icons.delete,
-                    color: Colors.red,
+                child: Card(
+                  elevation: 4,
+                  margin: const EdgeInsets.all(10),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  child: ListTile(
+                    title: Text(todos[index]),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: const Icon(
+                            Icons.edit,
+                            color: Colors.green,
+                          ),
+                          onPressed: () async {
+                            String updatedName = await showDialog(
+                              context: context,
+                              builder: (BuildContext context) {
+                                String newName = todos[index];
+                                return AlertDialog(
+                                  title: const Text("Edit Task"),
+                                  content: TextField(
+                                    onChanged: (value) {
+                                      newName = value;
+                                    },
+                                    controller: TextEditingController(text: todos[index]),
+                                  ),
+                                  actions: <Widget>[
+                                    TextButton(
+                                      onPressed: () {
+                                        Navigator.of(context).pop(todos[index]);
+                                      },
+                                      child: const Text("Cancel"),
+                                    ),
+                                    ElevatedButton(
+                                      onPressed: () {
+                                        Navigator.of(context).pop(newName);
+                                      },
+                                      child: const Text("Save"),
+                                    )
+                                  ],
+                                );
+                              },
+                            );
+
+                            if (updatedName != null && updatedName != todos[index]) {
+                              await FirebaseFirestore.instance
+                                  .collection("MyToDoList")
+                                  .where("todoTitle", isEqualTo: todos[index])
+                                  .where("userId", isEqualTo: userId)
+                                  .get()
+                                  .then(
+                                    (QuerySnapshot snapshot) {
+                                  snapshot.docs.forEach((doc) {
+                                    doc.reference.update({"todoTitle": updatedName});
+                                  });
+                                },
+                              );
+                              await todoProvider.loadTodos(userId);
+                            }
+                          },
+                        ),
+                        IconButton(
+                          icon: const Icon(
+                            Icons.delete,
+                            color: Colors.red,
+                          ),
+                          onPressed: () async {
+                            await todoProvider.removeTodo(todos[index], userId);
+                          },
+                        ),
+                      ],
+                    ),
                   ),
-                  onPressed: () async {
-                    await FirebaseFirestore.instance
-                        .collection("MyToDoList")
-                        .where("todoTitle", isEqualTo: todos[index])
-                        .get()
-                        .then(
-                          (QuerySnapshot snapshot) {
-                        snapshot.docs.forEach((doc) {
-                          doc.reference.delete();
-                        });
-                      },
-                    );
-                    await loadTodos();
-                  },
                 ),
-              ),
-            ),
+              );
+            },
           );
         },
       ),
@@ -271,60 +323,15 @@ class _TodoListPageState extends State<TodoListPage> {
   }
 }
 
-class RegisterPage extends StatefulWidget {
+class RegisterPage extends StatelessWidget {
   const RegisterPage({Key? key}) : super(key: key);
 
   @override
-  _RegisterPageState createState() => _RegisterPageState();
-}
-
-class _RegisterPageState extends State<RegisterPage> {
-  final TextEditingController _usernameController = TextEditingController();
-  final TextEditingController _emailController = TextEditingController();
-  final TextEditingController _passwordController = TextEditingController();
-
-  Future<void> _registerUser() async {
-    try {
-      UserCredential userCredential = await FirebaseAuth.instance.createUserWithEmailAndPassword(
-        email: _emailController.text.trim(),
-        password: _passwordController.text,
-      );
-
-      // Enregistrement de l'utilisateur dans Firestore
-      await FirebaseFirestore.instance.collection("users").doc(userCredential.user!.uid).set({
-        "username": _usernameController.text.trim(), // Enregistrer le nom d'utilisateur
-        "email": _emailController.text.trim(),
-      });
-
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const TodoListPage()),
-      );
-    } on FirebaseAuthException catch (e) {
-      showDialog(
-        context: context,
-        builder: (BuildContext context) {
-          return AlertDialog(
-            title: const Text('Error'),
-            content: Text(e.message ?? 'An error occurred while registering. Please try again.'),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  Navigator.pop(context);
-                },
-                child: const Text('OK'),
-              ),
-            ],
-          );
-        },
-      );
-    } catch (e) {
-      print(e.toString());
-    }
-  }
-
-  @override
   Widget build(BuildContext context) {
+    final TextEditingController _usernameController = TextEditingController();
+    final TextEditingController _emailController = TextEditingController();
+    final TextEditingController _passwordController = TextEditingController();
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Register'),
@@ -351,7 +358,45 @@ class _RegisterPageState extends State<RegisterPage> {
             ),
             const SizedBox(height: 20),
             ElevatedButton(
-              onPressed: _registerUser,
+              onPressed: () async {
+                try {
+                  UserCredential userCredential = await FirebaseAuth.instance.createUserWithEmailAndPassword(
+                    email: _emailController.text.trim(),
+                    password: _passwordController.text,
+                  );
+
+                  // Enregistrement de l'utilisateur dans Firestore
+                  await FirebaseFirestore.instance.collection("users").doc(userCredential.user!.uid).set({
+                    "username": _usernameController.text.trim(), // Enregistrer le nom d'utilisateur
+                    "email": _emailController.text.trim(),
+                  });
+
+                  Navigator.pushReplacement(
+                    context,
+                    MaterialPageRoute(builder: (context) => const TodoListPage()),
+                  );
+                } on FirebaseAuthException catch (e) {
+                  showDialog(
+                    context: context,
+                    builder: (BuildContext context) {
+                      return AlertDialog(
+                        title: const Text('Error'),
+                        content: Text(e.message ?? 'An error occurred while registering. Please try again.'),
+                        actions: [
+                          TextButton(
+                            onPressed: () {
+                              Navigator.pop(context);
+                            },
+                            child: const Text('OK'),
+                          ),
+                        ],
+                      );
+                    },
+                  );
+                } catch (e) {
+                  print(e.toString());
+                }
+              },
               child: const Text('Register'),
             ),
           ],
@@ -361,53 +406,14 @@ class _RegisterPageState extends State<RegisterPage> {
   }
 }
 
-class LoginPage extends StatefulWidget {
+class LoginPage extends StatelessWidget {
   const LoginPage({Key? key}) : super(key: key);
 
   @override
-  _LoginPageState createState() => _LoginPageState();
-}
-
-class _LoginPageState extends State<LoginPage> {
-  final TextEditingController _emailController = TextEditingController();
-  final TextEditingController _passwordController = TextEditingController();
-
-  Future<void> _loginUser() async {
-    try {
-      UserCredential userCredential = await FirebaseAuth.instance.signInWithEmailAndPassword(
-        email: _emailController.text.trim(),
-        password: _passwordController.text,
-      );
-
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const TodoListPage()),
-      );
-    } on FirebaseAuthException catch (e) {
-      showDialog(
-        context: context,
-        builder: (BuildContext context) {
-          return AlertDialog(
-            title: const Text('Error'),
-            content: Text(e.message ?? 'An error occurred while logging in. Please try again.'),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  Navigator.pop(context);
-                },
-                child: const Text('OK'),
-              ),
-            ],
-          );
-        },
-      );
-    } catch (e) {
-      print(e.toString());
-    }
-  }
-
-  @override
   Widget build(BuildContext context) {
+    final TextEditingController _emailController = TextEditingController();
+    final TextEditingController _passwordController = TextEditingController();
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Login'),
@@ -429,7 +435,39 @@ class _LoginPageState extends State<LoginPage> {
             ),
             const SizedBox(height: 20),
             ElevatedButton(
-              onPressed: _loginUser,
+              onPressed: () async {
+                try {
+                  UserCredential userCredential = await FirebaseAuth.instance.signInWithEmailAndPassword(
+                    email: _emailController.text.trim(),
+                    password: _passwordController.text,
+                  );
+
+                  Navigator.pushReplacement(
+                    context,
+                    MaterialPageRoute(builder: (context) => const TodoListPage()),
+                  );
+                } on FirebaseAuthException catch (e) {
+                  showDialog(
+                    context: context,
+                    builder: (BuildContext context) {
+                      return AlertDialog(
+                        title: const Text('Error'),
+                        content: Text(e.message ?? 'An error occurred while logging in. Please try again.'),
+                        actions: [
+                          TextButton(
+                            onPressed: () {
+                              Navigator.pop(context);
+                            },
+                            child: const Text('OK'),
+                          ),
+                        ],
+                      );
+                    },
+                  );
+                } catch (e) {
+                  print(e.toString());
+                }
+              },
               child: const Text('Login'),
             ),
           ],
